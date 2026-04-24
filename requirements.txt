@@ -1,0 +1,21 @@
+# Core
+torch>=2.1.0
+transformers>=4.40.0
+scipy>=1.11.0        # rel_entr for correct KL computation
+numpy>=1.24.0
+Pillow>=9.0.0
+
+# Agent / LLM
+langchain>=0.2.0
+langchain-groq>=0.1.0
+langchain-core>=0.2.0
+langgraph>=0.1.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Optional
+accelerate>=0.27.0   # for device_map="auto" on GPU
+langchain_openai
+sentencepiece
+modelpulse==0.3.0
+python-multipart

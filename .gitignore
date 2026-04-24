@@ -1,0 +1,9 @@
+__pycache__/
+llama.cpp/
+output-layerwise.gguf
+input-f16.gguf
+model-shards/
+temp_test_tool.py
+results/
+artifacts/
+imatrix.dat
