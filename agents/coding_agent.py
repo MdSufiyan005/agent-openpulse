@@ -42,13 +42,13 @@ OUTPUT_GGUF     = os.environ.get("OUTPUT_GGUF",    "output-layerwise.gguf")
 LLAMA_QUANTIZE  = os.environ.get("LLAMA_QUANTIZE", "./llama.cpp/build/bin/llama-quantize")
 IMATRIX_PATH    = os.environ.get("IMATRIX_PATH",   "imatrix.dat")
 DRY_RUN         = os.environ.get("DRY_RUN",        "0") == "1"
-MERGED_PATH     = "results/unified_compression_report.json"
-SCRIPT_PATH     = "results/quantize_run.sh"
-LOG_PATH        = "results/quantize_run.log"
+MERGED_PATH     = "artifacts/results/unified_compression_report.json"
+SCRIPT_PATH     = "artifacts/results/quantize_run.sh"
+LOG_PATH        = "artifacts/results/quantize_run.log"
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "openrouter").lower()
+LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "groq").lower()
 
 
 # ── Tools for the coding agent ────────────────────────────────────────────────
@@ -97,7 +97,7 @@ def validate_and_build_command(
     merged_report_path: str = MERGED_PATH,
     input_gguf:         str = INPUT_GGUF,
     output_gguf:        str = OUTPUT_GGUF,
-    imatrix_path:       str = "imatrix.dat",
+    imatrix_path:       str = IMATRIX_PATH,
     llama_quantize_bin: str = LLAMA_QUANTIZE,
 ) -> str:
     """
@@ -430,7 +430,7 @@ def create_coding_agent(tools: list | None = None):
     else:
         from langchain_groq import ChatGroq
         llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             temperature=0, max_tokens=2048, api_key=GROQ_API_KEY,
         )
 

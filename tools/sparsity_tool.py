@@ -310,6 +310,7 @@ def make_sparsity_tool(model, processor, images, image_dir, clean_state, device)
             add_generation_prompt=True
         )
         inputs = processor(text=prompt, images=[image], return_tensors="pt")
+        print(f"Target Device: {device}")
         return {
             k: v.to(device=model_device, dtype=target_dtype) if v.is_floating_point()
                else v.to(model_device)
@@ -328,7 +329,20 @@ def make_sparsity_tool(model, processor, images, image_dir, clean_state, device)
         bleu_floor=0.8,
         n_eval_samples=1,
         output_path="sparsity_sensitivity_report.json",
-    ) -> str:
+    ):
+        """
+        NNI-based sparsity sensitivity analysis tool.
+
+        Applies L1-magnitude pruning at multiple sparsity levels and evaluates
+        output divergence using Jensen-Shannon distance.
+
+        Determines:
+        - layer robustness to pruning
+        - safe compression threshold
+        - quantization recommendation
+
+        Should only be used after KL analysis identifies borderline layers.
+        """
 
         model.eval()
         log = {}
@@ -439,3 +453,4 @@ def make_sparsity_tool(model, processor, images, image_dir, clean_state, device)
             json.dump(report, f, indent=2)
 
         return f"Sparsity done. Saved: {output_path}"
+    return sparsity_sensitivity_sweep

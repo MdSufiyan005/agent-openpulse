@@ -258,27 +258,30 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 from tools.kl_divergence_tool  import make_kl_tool
-from tools.conductance_tool    import make_conductance_tool
 from tools.sparsity_tool       import make_sparsity_tool
-from tools.merge_report_tool   import merge_analysis_reports
-from memory import load_memory_compact
+from agents.memory import load_memory_compact
 
 load_dotenv()
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "openrouter").lower()
+LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "groq").lower()
 MAX_MEMORY_CHARS   = 1600
 
-
 def build_tools(model, processor, images: list, image_dir: str) -> list:
-    """All four analysis tools. Agent decides which optional ones to invoke."""
     return [
         make_kl_tool(model, processor, images, image_dir),
-        make_conductance_tool(model, processor, images, image_dir),
-        make_sparsity_tool(model, processor, images, image_dir),
-        merge_analysis_reports,
+        # ✅ NNI-based sparsity tool (your new one)
+        make_sparsity_tool(
+            model=model,
+            processor=processor,
+            images=images,
+            image_dir=image_dir,
+            clean_state=None,
+            device=next(model.parameters()).device
+        ),
     ]
+
 
 
 def _make_llm(provider: str, model_name: str | None = None):
@@ -298,7 +301,7 @@ def _make_llm(provider: str, model_name: str | None = None):
             raise EnvironmentError("GROQ_API_KEY not set")
         from langchain_groq import ChatGroq
         return ChatGroq(
-            model=model_name or "llama-3.3-70b-versatile",
+            model=model_name or "openai/gpt-oss-20b",
             temperature=0, max_tokens=2048, api_key=GROQ_API_KEY,
         )
 

@@ -20,11 +20,9 @@ import torch
 import subprocess
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
-
 IMAGE_DIR = os.environ.get("IMAGE_DIR", "images")
 MODEL_ID  = os.environ.get("MODEL_ID", "HuggingFaceTB/SmolVLM-Instruct")
 MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "4"))
-
 
 @dataclass
 class RunContext:
@@ -145,7 +143,9 @@ def build_context() -> RunContext:
 
     model = AutoModelForImageTextToText.from_pretrained(
         "HuggingFaceTB/SmolVLM-Instruct",
-        cache_dir=CACHE_DIR
+        cache_dir=CACHE_DIR,
+        torch_dtype=dtype,
+        device_map="auto"   # 🔥 IMPORTANT
     )
 
     processor = AutoProcessor.from_pretrained(
@@ -184,7 +184,7 @@ def build_context() -> RunContext:
 
     export_to_gguf_if_needed(
     hf_model_id=MODEL_ID,
-    output_gguf="input-f16.gguf"
+    output_gguf="data/input-f16.gguf"
     )
 
     return RunContext(
