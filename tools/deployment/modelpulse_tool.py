@@ -279,7 +279,7 @@ METRICS_JSONL_PATH: str = "artifacts/results/metrics.jsonl"
 
 
 def start_modelpulse_server(
-    host: str = "0.0.0.0",
+    host: str = "100.81.117.95",
     port: int = 8000,
     log_dir: str = "results",           # server writes metrics.jsonl HERE
     shard_dir: str = "models-storage",  # server stores uploaded model shards HERE
@@ -306,7 +306,8 @@ def start_modelpulse_server(
         "modelpulse", "server", "run",
         "--host", host,
         "--port", str(port),
-        "--shard-dir", shard_dir,
+        # "--shard-dir", shard_dir,
+        "--ping-interval","120.0",
         "--log-dir", log_dir,
     ]
     print(f"[ModelPulse] Starting server: {' '.join(cmd)}")
@@ -325,7 +326,7 @@ def start_modelpulse_server(
 
     threading.Thread(target=_stream_logs, args=(_server_proc,), daemon=True).start()
 
-    check_host = "127.0.0.1" if host == "0.0.0.0" else host
+    check_host = "127.0.0.1" if host == "100.81.117.95" else host
     deadline = time.time() + readiness_timeout
     while time.time() < deadline:
         try:
@@ -391,7 +392,7 @@ def upload_model_to_server(
     model_name: str,
     input_gguf: str,
     shard_dir: str,
-    server_url: str = "http://127.0.0.1:8000",
+    server_url: str = "http://100.81.117.95",
 ):
     """
     Shard (if needed) then upload to the running server.
@@ -424,7 +425,7 @@ def upload_model_to_server(
     return result.stdout
 
 
-def make_modelpulse_tool(server_host: str = "127.0.0.1", server_port: int = 8000):
+def make_modelpulse_tool(server_host: str = "100.81.117.95", server_port: int = 8000):
     @tool("modelpulse_upload")
     def modelpulse_upload(model_name: str, model_shard_dir: str, input_gguf: str = ""):
         """Upload a model to the running ModelPulse server."""

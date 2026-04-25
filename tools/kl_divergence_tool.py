@@ -629,6 +629,7 @@ def make_kl_tool(model, processor, images, image_dir):
               f"(noise_scale={noise_scale}, threshold={bits_threshold} bits)...")
 
         # ── Layer loop ────────────────────────────────────────────────────
+        layer_names = layer_names[:5]
         for i, name in enumerate(layer_names):
             if name not in module_dict:
                 print(f"[kl] {i+1}/{len(layer_names)} SKIP {name} (not in model)")
