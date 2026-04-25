@@ -55,19 +55,73 @@ def _get_linear_layers(model: torch.nn.Module, decoder_only: bool = True) -> Lis
     return layers
 
 
+# def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
+#     if os.path.exists(output_gguf):
+#         print(f"[setup] Found existing GGUF: {output_gguf}")
+#         return
+
+#     print("[setup] Downloading HF model locally...")
+
+#     from huggingface_hub import snapshot_download
+
+#     local_dir = snapshot_download(
+#         repo_id=hf_model_id,
+#         local_dir="./artifacts/hf_model",
+#         local_dir_use_symlinks=False
+#     )
+
+#     print(f"[setup] Model downloaded to: {local_dir}")
+
+#     print("[setup] Converting to GGUF (F16)...")
+
+#     convert_script = "./llama.cpp/convert_hf_to_gguf.py"
+
+#     cmd = [
+#         "python", convert_script,
+#         local_dir,  # ✅ NOW this is a REAL directory
+#         "--outfile", output_gguf,
+#         "--outtype", "f16"
+#     ]
+
+#     result = subprocess.run(cmd, capture_output=True, text=True)
+
+#     if result.returncode != 0:
+#         print(result.stderr)
+#         raise RuntimeError("GGUF conversion failed")
+
+#     print(f"[setup] ✅ GGUF created: {output_gguf}")
+
 def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
     if os.path.exists(output_gguf):
         print(f"[setup] Found existing GGUF: {output_gguf}")
         return
 
-    print("[setup] Downloading HF model locally...")
+    print("[setup] Downloading MINIMAL HF model...")
 
     from huggingface_hub import snapshot_download
 
     local_dir = snapshot_download(
         repo_id=hf_model_id,
         local_dir="./artifacts/hf_model",
-        local_dir_use_symlinks=False
+        local_dir_use_symlinks=False,
+
+        # 🔥 ONLY download required files
+        allow_patterns=[
+            "*.json",
+            "*.safetensors",   # main weights
+            "*.model",         # tokenizer
+            "*.py",
+            "tokenizer.*",
+            "preprocessor_config.json"
+        ],
+
+        # ❌ explicitly ignore garbage
+        ignore_patterns=[
+            "*.bin",
+            "*.pt",
+            "*.h5",
+            "*.msgpack"
+        ]
     )
 
     print(f"[setup] Model downloaded to: {local_dir}")
@@ -78,7 +132,7 @@ def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
 
     cmd = [
         "python", convert_script,
-        local_dir,  # ✅ NOW this is a REAL directory
+        local_dir,
         "--outfile", output_gguf,
         "--outtype", "f16"
     ]
