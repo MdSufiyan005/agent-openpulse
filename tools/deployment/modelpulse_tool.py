@@ -266,6 +266,20 @@ import socket
 import subprocess
 import threading
 from langchain_core.tools import tool
+from rich.console import Console
+from rich.panel import Panel
+from rich.status import Status
+from rich.theme import Theme
+
+# Global console with custom theme
+custom_theme = Theme({
+    "info": "cyan",
+    "warning": "yellow",
+    "error": "bold red",
+    "success": "bold green",
+    "progress": "magenta",
+})
+console = Console(theme=custom_theme)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -273,13 +287,52 @@ from langchain_core.tools import tool
 # ─────────────────────────────────────────────────────────────
 
 _server_proc: subprocess.Popen | None = None
+_bridge_proc: subprocess.Popen | None = None
 
+# Canonical path — set by start_modelpulse_server(), imported by run.py
 # Canonical path — set by start_modelpulse_server(), imported by run.py
 METRICS_JSONL_PATH: str = "artifacts/results/metrics.jsonl"
 
 
+def get_server_ip() -> str:
+    """
+    Attempt to auto-detect the Tailscale IP (100.64.0.0/10).
+    Falls back to '0.0.0.0' if not found.
+    """
+    import socket
+    import subprocess
+
+    # Try getting from 'ip' command on Linux
+    try:
+        output = subprocess.check_output(["ip", "-4", "addr", "show"], text=True)
+        for line in output.splitlines():
+            if "inet " in line and "100." in line:
+                parts = line.strip().split()
+                ip_cidr = parts[1]
+                ip = ip_cidr.split("/")[0]
+                # Check if in 100.64.0.0/10
+                ip_parts = ip.split(".")
+                if 64 <= int(ip_parts[1]) <= 127:
+                    return ip
+    except Exception:
+        pass
+
+    # Fallback to socket
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if ip.startswith("100."):
+                ip_parts = ip.split(".")
+                if 64 <= int(ip_parts[1]) <= 127:
+                    return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
 def start_modelpulse_server(
-    host: str = "100.81.117.95",
+    host: str = "0.0.0.0",
     port: int = 8000,
     log_dir: str = "results",           # server writes metrics.jsonl HERE
     shard_dir: str = "models-storage",  # server stores uploaded model shards HERE
@@ -291,50 +344,57 @@ def start_modelpulse_server(
     --shard-dir → server stores uploaded model shards here
     Blocks until port is accepting connections.
     """
-    global _server_proc, METRICS_JSONL_PATH
-
-    if _server_proc is not None and _server_proc.poll() is None:
-        print("[ModelPulse] Server already running — skipping.")
-        return _server_proc
-
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(shard_dir, exist_ok=True)
-
+    global METRICS_JSONL_PATH
     METRICS_JSONL_PATH = os.path.join(log_dir, "metrics.jsonl")
+
+    # Check if port is already in use
+    check_host = "127.0.0.1" if host == "0.0.0.0" else host
+    try:
+        with socket.create_connection((check_host, port), timeout=0.5):
+            console.print(f"[warning]⚠ Port {port} is already occupied. Using existing server instance.[/warning]")
+            return None
+    except (OSError, ConnectionRefusedError):
+        pass
 
     cmd = [
         "modelpulse", "server", "run",
         "--host", host,
         "--port", str(port),
-        # "--shard-dir", shard_dir,
         "--ping-interval","120.0",
         "--log-dir", log_dir,
     ]
-    print(f"[ModelPulse] Starting server: {' '.join(cmd)}")
-    print(f"[ModelPulse] Metrics will be written to: {METRICS_JSONL_PATH}")
+    
+    with console.status(f"[info]Starting ModelPulse Server on {host}:{port}...[/info]", spinner="dots"):
+        _server_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
-    _server_proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+        def _stream_logs(proc: subprocess.Popen):
+            log_path = "artifacts/results/server.log"
+            with open(log_path, "a") as f:
+                for line in proc.stdout:
+                    f.write(line)
+                    f.flush()
 
-    def _stream_logs(proc: subprocess.Popen):
-        for line in proc.stdout:
-            print(f"[ModelPulse-server] {line}", end="")
+        threading.Thread(target=_stream_logs, args=(_server_proc,), daemon=True).start()
 
-    threading.Thread(target=_stream_logs, args=(_server_proc,), daemon=True).start()
-
-    check_host = "127.0.0.1" if host == "100.81.117.95" else host
-    deadline = time.time() + readiness_timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((check_host, port), timeout=1):
-                print(f"[ModelPulse] Server ready → http://{host}:{port}")
-                return _server_proc
-        except OSError:
-            time.sleep(0.5)
+        deadline = time.time() + readiness_timeout
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((check_host, port), timeout=1):
+                    console.print(Panel(
+                        f"[success]✔ Server is up and running![/success]\n"
+                        f"[info]URL:[/info] http://{check_host}:{port}\n"
+                        f"[info]Logs:[/info] {METRICS_JSONL_PATH}",
+                        title="ModelPulse Infrastructure",
+                        border_style="green"
+                    ))
+                    return _server_proc
+            except OSError:
+                time.sleep(0.5)
 
     raise RuntimeError(f"[ModelPulse] Server not ready after {readiness_timeout}s")
 
@@ -343,9 +403,81 @@ def stop_modelpulse_server():
     global _server_proc
     if _server_proc and _server_proc.poll() is None:
         _server_proc.terminate()
-        _server_proc.wait(timeout=5)
+        try:
+            _server_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _server_proc.kill()
         print("[ModelPulse] Server stopped.")
     _server_proc = None
+
+
+def start_modelpulse_bridge(server_url: str) -> subprocess.Popen:
+    """
+    Launch the ModelPulse bridge (client) in the background.
+    It connects to the server and waits for models to benchmark.
+    """
+    global _bridge_proc
+
+    if _bridge_proc is not None and _bridge_proc.poll() is None:
+        print("[ModelPulse] Bridge already running — skipping.")
+        return _bridge_proc
+
+    cmd = ["modelpulse", "bridge", "run", server_url, "--benchmark"]
+    
+    with console.status(f"[info]Launching ModelPulse Bridge...[/info]", spinner="bouncingBar"):
+        _bridge_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        def _stream_bridge_logs(proc: subprocess.Popen):
+            log_path = "artifacts/results/bridge.log"
+            with open(log_path, "a") as f:
+                for line in proc.stdout:
+                    f.write(line)
+                    f.flush()
+
+        threading.Thread(target=_stream_bridge_logs, args=(_bridge_proc,), daemon=True).start()
+    return _bridge_proc
+
+
+def wait_for_client(server_url: str, timeout: int = 60):
+    """
+    Poll the server until at least one client (bridge) is connected.
+    """
+    import httpx
+    deadline = time.time() + timeout
+    
+    with console.status(f"[progress]⌛ Waiting for bridge connection to {server_url}...[/progress]", spinner="earth") as status:
+        while time.time() < deadline:
+            try:
+                resp = httpx.get(f"{server_url}/ws/clients", timeout=2)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    count = data.get("count", 0)
+                    if count > 0:
+                        console.print(f"[success]✔ Bridge connected! (Active IDs: {', '.join(data.get('client_ids', []))})[/success]")
+                        return True
+            except Exception:
+                pass
+            time.sleep(2)
+    
+    console.print(f"[error]✘ No client connected after {timeout}s[/error]")
+    return False
+
+
+def stop_modelpulse_bridge():
+    global _bridge_proc
+    if _bridge_proc and _bridge_proc.poll() is None:
+        _bridge_proc.terminate()
+        try:
+            _bridge_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _bridge_proc.kill()
+        print("[ModelPulse] Bridge stopped.")
+    _bridge_proc = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -392,7 +524,7 @@ def upload_model_to_server(
     model_name: str,
     input_gguf: str,
     shard_dir: str,
-    server_url: str = "http://100.81.117.95",
+    server_url: str = "http://0.0.0.0",
 ):
     """
     Shard (if needed) then upload to the running server.
@@ -425,7 +557,7 @@ def upload_model_to_server(
     return result.stdout
 
 
-def make_modelpulse_tool(server_host: str = "100.81.117.95", server_port: int = 8000):
+def make_modelpulse_tool(server_host: str = "0.0.0.0", server_port: int = 8000):
     @tool("modelpulse_upload")
     def modelpulse_upload(model_name: str, model_shard_dir: str, input_gguf: str = ""):
         """Upload a model to the running ModelPulse server."""

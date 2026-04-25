@@ -15,14 +15,23 @@ from tools.sparsity_tool import make_sparsity_tool
 from tools.deployment.modelpulse_tool import (
     start_modelpulse_server,
     stop_modelpulse_server,
+    start_modelpulse_bridge,
+    stop_modelpulse_bridge,
+    wait_for_client,
     upload_model_to_server,
     shard_gguf,
     METRICS_JSONL_PATH,
+    get_server_ip,
 )
 from tools.compress_context import build_planner_context
-from dotenv import load_dotenv
 from pathlib import Path
-
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.live import Live
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from dotenv import load_dotenv
+console = Console()
 load_dotenv()
 
 # ─────────────────────────────────────────────
@@ -38,6 +47,7 @@ KL_PATH         = os.path.join(RESULTS_DIR, "kl_divergence_report.json")
 NNI_PATH        = os.path.join(RESULTS_DIR, "nni_sparsity_report.json")
 MERGED_PATH     = os.path.join(RESULTS_DIR, "unified_compression_report.json")
 METRICS_PATH    = os.path.join(RESULTS_DIR, "metrics.jsonl")
+AGENT_LOG_PATH  = os.path.join(RESULTS_DIR, "agent_log.json")
 
 BASE_GGUF       = os.path.join(ARTIFACTS_DIR, "input-f16.gguf")          # original — NEVER touched
 FULLQUANT_GGUF  = os.path.join(ARTIFACTS_DIR, "full-q4km.gguf")          # naive Q4_K_M baseline
@@ -46,9 +56,9 @@ LAYERWISE_NAME  = "output-layerwise"                                       # no 
 REFERENCE_DOCS  = os.path.join("reference_docs", "agent_reference.md")
 EDGE_REF        = os.path.join("reference_docs", "edge_ai_metrics_reference.md")
 
-SERVER_HOST     = "100.81.117.95"
-SERVER_PORT     = 8000
-SERVER_URL      = f"http://100.81.117.95:{SERVER_PORT}"
+SERVER_HOST     = os.getenv("SERVER_HOST", "127.0.0.1")
+SERVER_PORT     = int(os.getenv("SERVER_PORT", 8000))
+SERVER_URL      = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -63,6 +73,28 @@ DEFAULT_SPARSITY = [0.3, 0.4, 0.5]
 
 for d in [ARTIFACTS_DIR, RESULTS_DIR, MODELS_DIR, SHARDS_DIR]:
     os.makedirs(d, exist_ok=True)
+
+
+# ─────────────────────────────────────────────
+# STARTUP — ModelPulse Infrastructure
+# ─────────────────────────────────────────────
+# Start server and bridge early so they are ready while the model is downloading/loading
+start_modelpulse_server(
+    host="0.0.0.0",
+    port=SERVER_PORT,
+    log_dir=RESULTS_DIR,
+    shard_dir=MODELS_DIR,
+)
+if os.getenv("DISABLE_LOCAL_BRIDGE", "false").lower() != "true":
+    start_modelpulse_bridge(SERVER_URL)
+else:
+    console.print("[yellow]ℹ Local bridge disabled by environment variable.[/yellow]")
+
+# BLOCK until client connects
+if not wait_for_client(SERVER_URL, timeout=120):
+    print("[CRITICAL] No client connected. ModelPulse cannot collect metrics.")
+    print("Please ensure the edge device/bridge is reachable.")
+    sys.exit(1)
 
 
 # ─────────────────────────────────────────────
@@ -140,12 +172,13 @@ def upload_with_retry(model_name: str, gguf_path: str, metrics_path: str,
                       base_shard_dir: str = None) -> tuple[float, str]:
     """Upload + wait for metrics. Re-uploads on timeout. Returns (new_last_seen, shard_dir)."""
     shard_dir = None
-    while True:
-        shard_dir = shard_and_upload(model_name, gguf_path, base_name, base_shard_dir)
-        result = wait_for_metrics(metrics_path, last_seen)
-        if result != -1:
-            return result, shard_dir
-        print("[RETRY] Re-uploading to prompt client...")
+    with console.status(f"[bold magenta]Uploading {model_name} and waiting for metrics...[/bold magenta]", spinner="simpleDots"):
+        while True:
+            shard_dir = shard_and_upload(model_name, gguf_path, base_name, base_shard_dir)
+            result = wait_for_metrics(metrics_path, last_seen)
+            if result != -1:
+                return result, shard_dir
+            console.print("[yellow]⚠️ [RETRY] Re-uploading to prompt client...[/yellow]")
 
 
 def parse_planner_response(response) -> dict:
@@ -251,52 +284,46 @@ Respond ONLY as valid JSON (no markdown fences):
 ctx_obj = build_context()
 target_layers = ctx_obj.linear_layers
 
-print("[DEBUG] Model device:", next(ctx_obj.model.parameters()).device)
-print("=" * 70)
-print("  CHISELED — KL-NNI FEEDBACK LOOP WITH COMPARISON PIPELINE  ")
-print("=" * 70)
+console.print(Panel.fit(
+    "[bold green]CHISELED[/bold green] — KL-NNI FEEDBACK LOOP WITH COMPARISON PIPELINE",
+    border_style="bold blue",
+    padding=(1, 4)
+))
 
 reference_docs = load_ref(REFERENCE_DOCS)
 edge_ref       = load_ref(EDGE_REF)
-print(f"[INFO] Reference docs: {len(reference_docs)} chars | Edge ref: {len(edge_ref)} chars")
-
-# Start ModelPulse server
-start_modelpulse_server(
-    host=SERVER_HOST,
-    port=SERVER_PORT,
-    log_dir=RESULTS_DIR,
-    shard_dir=MODELS_DIR,
-)
+console.print(f"[dim]Docs loaded: {len(reference_docs)} chars | Edge ref: {len(edge_ref)} chars[/dim]")
 
 # ─────────────────────────────────────────────
 # PHASE 1 — KL (cached)
 # ─────────────────────────────────────────────
-print("\n── PHASE 1 — KL Divergence ──")
+console.print("\n[bold yellow]── PHASE 1 — KL Divergence ──[/bold yellow]")
 if not os.path.exists(KL_PATH):
-    kl_tool = make_kl_tool(ctx_obj.model, ctx_obj.processor, ctx_obj.images, ctx_obj.IMAGE_DIR)
-    kl_tool.invoke({
-        "layer_names":    target_layers,
-        "noise_scale":    NOISE_SCALE,
-        "n_samples":      N_SAMPLES,
-        "bits_threshold": KL_THRESHOLD,
-        "batch_size":     BATCH_SIZE,
-        "output_path":    KL_PATH,
-        "resume":         True,
-    })
+    with console.status("[cyan]Computing KL Divergence (this may take time)...[/cyan]", spinner="arc"):
+        kl_tool = make_kl_tool(ctx_obj.model, ctx_obj.processor, ctx_obj.images, ctx_obj.IMAGE_DIR, is_vlm=ctx_obj.is_vlm)
+        kl_tool.invoke({
+            "layer_names":    target_layers,
+            "noise_scale":    NOISE_SCALE,
+            "n_samples":      N_SAMPLES,
+            "bits_threshold": KL_THRESHOLD,
+            "batch_size":     BATCH_SIZE,
+            "output_path":    KL_PATH,
+            "resume":         True,
+        })
 else:
-    print(f"[KL] Cached → {KL_PATH}")
+    console.print(f"[success]✔ KL Cached[/success] → [dim]{KL_PATH}[/dim]")
 
 
 # ─────────────────────────────────────────────
 # PHASE 2 — BASELINE BENCHMARK (input-f16)
 # ─────────────────────────────────────────────
-print("\n── PHASE 2 — Baseline Benchmark (input-f16.gguf) ──")
+console.print("\n[bold yellow]── PHASE 2 — Baseline Benchmark (input-f16.gguf) ──[/bold yellow]")
 baseline_metrics   = None
 fullquant_metrics  = None
 last_seen          = 0.0
 
 if not os.path.exists(BASE_GGUF):
-    print(f"[ERROR] Base GGUF not found at {BASE_GGUF}. Run setup first.")
+    console.print(f"[bold red]✘ Error:[/bold red] Base GGUF not found at {BASE_GGUF}. Run setup first.")
     sys.exit(1)
 
 last_seen, base_shard_dir = upload_with_retry(
@@ -307,24 +334,32 @@ last_seen, base_shard_dir = upload_with_retry(
 )
 raw_baseline = run_metrics_agent(METRICS_PATH, edge_ref)
 baseline_metrics = json.loads(raw_baseline) if isinstance(raw_baseline, str) else raw_baseline
-os.remove(METRICS_PATH)
-print(f"[BASELINE] {json.dumps(baseline_metrics, indent=2)}")
+# os.remove(METRICS_PATH)
+
+# Display Baseline Results in Table
+table = Table(title="Baseline Performance (F16)", border_style="cyan")
+table.add_column("Metric", style="bold")
+table.add_column("Value", justify="right")
+if isinstance(baseline_metrics, dict):
+    for k, v in baseline_metrics.items():
+        table.add_row(k, str(v))
+console.print(table)
 
 
 # ─────────────────────────────────────────────
 # PHASE 3 — FULL QUANTIZATION BENCHMARK (Q4_K_M all layers)
 # ─────────────────────────────────────────────
-print("\n── PHASE 3 — Full Q4_K_M Benchmark ──")
+console.print("\n[bold yellow]── PHASE 3 — Full Q4_K_M Benchmark ──[/bold yellow]")
 
 if not os.path.exists(FULLQUANT_GGUF):
-    print("[FullQuant] Generating naive Q4_K_M GGUF...")
-    run_coding_agent(
-        merged_report_path=None,           # signals: just do full Q4_K_M
-        input_gguf=BASE_GGUF,
-        output_gguf=FULLQUANT_GGUF,
-        full_quant_mode=True,              # new flag — see coding_agent.py
-        dry_run=False,
-    )
+    with console.status("[magenta]Generating naive Q4_K_M GGUF...[/magenta]", spinner="bouncingBall"):
+        run_coding_agent(
+            merged_report_path=None,           # signals: just do full Q4_K_M
+            input_gguf=BASE_GGUF,
+            output_gguf=FULLQUANT_GGUF,
+            full_quant_mode=True,              # new flag — see coding_agent.py
+            dry_run=False,
+        )
 
 last_seen, fullquant_shard_dir = upload_with_retry(
     model_name="full-q4km",
@@ -336,8 +371,16 @@ last_seen, fullquant_shard_dir = upload_with_retry(
 )
 raw_fullquant = run_metrics_agent(METRICS_PATH, edge_ref)
 fullquant_metrics = json.loads(raw_fullquant) if isinstance(raw_fullquant, str) else raw_fullquant
-os.remove(METRICS_PATH)
-print(f"[FULLQUANT] {json.dumps(fullquant_metrics, indent=2)}")
+# os.remove(METRICS_PATH)
+
+# Display FullQuant Results in Table
+table = Table(title="Full Quant Performance (Q4_K_M)", border_style="magenta")
+table.add_column("Metric", style="bold")
+table.add_column("Value", justify="right")
+if isinstance(fullquant_metrics, dict):
+    for k, v in fullquant_metrics.items():
+        table.add_row(k, str(v))
+console.print(table)
 
 
 # ─────────────────────────────────────────────
@@ -349,29 +392,29 @@ current_sparsity = DEFAULT_SPARSITY
 prev_layerwise_shard_dir = fullquant_shard_dir   # delta base for first layerwise upload
 
 for it in range(ITERATIONS):
-    print("\n" + "=" * 60)
-    print(f"  LAYERWISE ITERATION {it + 1} / {ITERATIONS}")
-    print("=" * 60)
+    console.print(f"\n[bold green]🔄 LAYERWISE ITERATION {it + 1} / {ITERATIONS}[/bold green]")
 
     # 1. Load cached KL
     with open(KL_PATH) as f:
         kl_report = json.load(f)
 
     # 2. NNI with planner-controlled sparsity
-    print(f"\n[NNI] Sparsity levels: {current_sparsity}")
+    console.print(f"[dim]NNI | Sparsity levels: {current_sparsity}[/dim]")
     disputed_layers = kl_report.get("borderline_layers", target_layers[:20])
 
-    nni_tool = make_sparsity_tool(
-        model=ctx_obj.model, processor=ctx_obj.processor,
-        images=ctx_obj.images, image_dir=ctx_obj.IMAGE_DIR,
-        clean_state=None, device=ctx_obj.device,
-    )
-    nni_tool.invoke({
-        "layer_names":     disputed_layers,
-        "sparsity_levels": current_sparsity,
-        "js_threshold":    0.1,
-        "output_path":     NNI_PATH,
-    })
+    with console.status("[cyan]Running NNI Sparsity Analysis...[/cyan]", spinner="dots9"):
+        nni_tool = make_sparsity_tool(
+            model=ctx_obj.model, processor=ctx_obj.processor,
+            images=ctx_obj.images, image_dir=ctx_obj.IMAGE_DIR,
+            clean_state=None, device=ctx_obj.device,
+            is_vlm=ctx_obj.is_vlm
+        )
+        nni_tool.invoke({
+            "layer_names":     disputed_layers,
+            "sparsity_levels": current_sparsity,
+            "js_threshold":    0.1,
+            "output_path":     NNI_PATH,
+        })
 
     with open(NNI_PATH) as f:
         nni_report = json.load(f)
@@ -392,10 +435,11 @@ for it in range(ITERATIONS):
     )
 
     # 5. Planner
-    print("\n[PLANNER] Invoking...")
+    console.print("[bold blue][PLANNER][/bold blue] Thinking...")
     agent, llm = create_ablation_agent(build_tools(
         model=ctx_obj.model, processor=ctx_obj.processor,
         images=ctx_obj.images, image_dir=ctx_obj.IMAGE_DIR,
+        is_vlm=ctx_obj.is_vlm
     ))
     raw_response = agent.invoke(
         {"messages": [("user", prompt)]},
@@ -403,24 +447,28 @@ for it in range(ITERATIONS):
     )
     planner = parse_planner_response(raw_response)
 
-    print(f"[PLANNER] change_required: {planner['change_required']}")
-    print(f"[PLANNER] sparsity next:   {planner['recommended_sparsity']}")
-    print(f"[PLANNER] reasoning:       {planner['reasoning']}")
+    console.print(Panel(
+        f"[bold cyan]Reasoning:[/bold cyan] {planner['reasoning']}\n\n"
+        f"[bold blue]Decision:[/bold blue] [green]{'CHANGE REQUIRED' if planner['change_required'] else 'NO CHANGE'}[/green]\n"
+        f"[bold blue]Next Sparsity:[/bold blue] {planner['recommended_sparsity']}",
+        title=f"Planner Decisions Iteration {it+1}",
+        border_style="blue"
+    ))
 
     current_sparsity = planner["recommended_sparsity"]
 
     # 6. Generate new GGUF only if needed
     layerwise_gguf = os.path.join(ARTIFACTS_DIR, f"{LAYERWISE_NAME}-{it}.gguf")
     if planner["change_required"]:
-        print(f"\n[GGUF] Generating {layerwise_gguf}...")
-        run_coding_agent(
-            merged_report_path=MERGED_PATH,
-            input_gguf=BASE_GGUF,
-            output_gguf=layerwise_gguf,
-            dry_run=False,
-        )
+        with console.status(f"[magenta]Generating {layerwise_gguf}...[/magenta]", spinner="dots"):
+            run_coding_agent(
+                merged_report_path=MERGED_PATH,
+                input_gguf=BASE_GGUF,
+                output_gguf=layerwise_gguf,
+                dry_run=False,
+            )
     else:
-        print("\n[GGUF] No change — skipping generation.")
+        console.print("[dim]No change required — skipping GGUF generation.[/dim]")
         if not os.path.exists(layerwise_gguf):
             prev = os.path.join(ARTIFACTS_DIR, f"{LAYERWISE_NAME}-{it-1}.gguf")
             layerwise_gguf = prev if os.path.exists(prev) else FULLQUANT_GGUF
@@ -442,8 +490,7 @@ for it in range(ITERATIONS):
     raw_metrics = run_metrics_agent(METRICS_PATH, edge_ref)
     metrics_summary = json.loads(raw_metrics) if isinstance(raw_metrics, str) else raw_metrics
     print(f"\n[METRICS] {json.dumps(metrics_summary, indent=2)}")
-    os.remove(METRICS_PATH)
-    print("[METRICS] Cleared.")
+# os.remove(METRICS_PATH)
 
     # 9. Save + memory
     save_run(
@@ -460,18 +507,29 @@ for it in range(ITERATIONS):
     if new_memory:
         agent_memory_log.append(f"[Iteration {it + 1}]\n{new_memory}")
         print(f"[MEMORY] Stored ({len(new_memory)} chars)")
+        with open(AGENT_LOG_PATH, "w") as f:
+            json.dump(agent_memory_log, f, indent=2)
 
 
 # ─────────────────────────────────────────────
 # FINAL COMPARISON SUMMARY
 # ─────────────────────────────────────────────
-print("\n" + "=" * 70)
-print("  FINAL COMPARISON")
-print("=" * 70)
-print(f"Baseline (F16):      {json.dumps(baseline_metrics)}")
-print(f"Full Q4_K_M:         {json.dumps(fullquant_metrics)}")
-print(f"Layerwise (last it): {json.dumps(metrics_summary)}")
-print("=" * 70)
-print("DONE")
+final_table = Table(title="Final Comparison Matrix", border_style="bold green")
+final_table.add_column("Variant", style="bold")
+final_table.add_column("Tokens/sec", justify="right")
+final_table.add_column("Latency (ms)", justify="right")
+final_table.add_column("RAM (MB)", justify="right")
 
+def _safe_get(d, k):
+    return str(d.get(k, "N/A")) if d else "N/A"
+
+final_table.add_row("Baseline (F16)", _safe_get(baseline_metrics, "tps"), _safe_get(baseline_metrics, "latency"), _safe_get(baseline_metrics, "ram"))
+final_table.add_row("Full Q4_K_M", _safe_get(fullquant_metrics, "tps"), _safe_get(fullquant_metrics, "latency"), _safe_get(fullquant_metrics, "ram"))
+final_table.add_row("Chiseled Layerwise", _safe_get(metrics_summary, "tps"), _safe_get(metrics_summary, "latency"), _safe_get(metrics_summary, "ram"))
+
+console.print("\n")
+console.print(final_table)
+console.print("\n[bold green]✔ Optimization pipeline complete.[/bold green]\n")
+
+stop_modelpulse_bridge()
 stop_modelpulse_server()

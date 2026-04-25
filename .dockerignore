@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+artifacts
+llama.cpp
+images/*.jpg
+images/*.png
+images/*.jpeg
+memory/*.json
+*.gguf
+.env
+.devcontainer

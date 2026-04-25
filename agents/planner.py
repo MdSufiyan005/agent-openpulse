@@ -268,9 +268,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "groq").lower()
 MAX_MEMORY_CHARS   = 1600
 
-def build_tools(model, processor, images: list, image_dir: str) -> list:
+def build_tools(model, processor, images: list, image_dir: str, is_vlm: bool = True) -> list:
     return [
-        make_kl_tool(model, processor, images, image_dir),
+        make_kl_tool(model, processor, images, image_dir, is_vlm=is_vlm),
         # ✅ NNI-based sparsity tool (your new one)
         make_sparsity_tool(
             model=model,
@@ -278,7 +278,8 @@ def build_tools(model, processor, images: list, image_dir: str) -> list:
             images=images,
             image_dir=image_dir,
             clean_state=None,
-            device=next(model.parameters()).device
+            device=next(model.parameters()).device,
+            is_vlm=is_vlm
         ),
     ]
 
@@ -301,7 +302,7 @@ def _make_llm(provider: str, model_name: str | None = None):
             raise EnvironmentError("GROQ_API_KEY not set")
         from langchain_groq import ChatGroq
         return ChatGroq(
-            model=model_name or "openai/gpt-oss-20b",
+            model=model_name or "llama-3.3-70b-versatile",
             temperature=0, max_tokens=2048, api_key=GROQ_API_KEY,
         )
 

@@ -43,7 +43,7 @@ def _load_model():
     else:
         from langchain_groq import ChatGroq
         return ChatGroq(
-            model="openai/gpt-oss-20b",
+            model="llama-3.3-70b-versatile",
             temperature=0, max_tokens=512, api_key=GROQ_API_KEY,
         )
 

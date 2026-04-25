@@ -293,29 +293,10 @@ class SparsityInput(BaseModel):
 
 
 
-def make_sparsity_tool(model, processor, images, image_dir, clean_state, device):
+def make_sparsity_tool(model, processor, images, image_dir, clean_state, device, is_vlm: bool = True):
     def _build_inputs(image_name):
-        from PIL import Image as PILImage
-        import os
-
-        model_device = next(model.parameters()).device
-        target_dtype = model.model.text_model.layers[0].self_attn.q_proj.weight.dtype
-
-        image  = PILImage.open(os.path.join(image_dir, image_name)).convert("RGB")
-        prompt = processor.apply_chat_template(
-            [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": "Describe this image in one small sentence."}
-            ]}],
-            add_generation_prompt=True
-        )
-        inputs = processor(text=prompt, images=[image], return_tensors="pt")
-        print(f"Target Device: {device}")
-        return {
-            k: v.to(device=model_device, dtype=target_dtype) if v.is_floating_point()
-               else v.to(model_device)
-            for k, v in inputs.items()
-        }
+        from setup import build_inputs
+        return build_inputs(processor, model, os.path.join(image_dir, image_name), is_vlm=is_vlm)
 
     from nni.compression.pruning import L1NormPruner
 

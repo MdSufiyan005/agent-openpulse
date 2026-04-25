@@ -1,0 +1,37 @@
+services:
+  chiseled:
+    build: .
+    container_name: chiseled-app
+    volumes:
+      - ./.env:/app/.env
+      - ./artifacts:/app/artifacts
+      - ./images:/app/images
+      - ./memory:/app/memory
+      - ./reference_docs:/app/reference_docs
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+
+  dashboard:
+    build: .
+    container_name: chiseled-dashboard
+    volumes:
+      - ./.env:/app/.env
+      - ./artifacts:/app/artifacts
+      - ./images:/app/images
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    depends_on:
+      - chiseled

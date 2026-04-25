@@ -590,7 +590,7 @@ def _kl_divergence_library(log_p: torch.Tensor, log_q: torch.Tensor) -> float:
 
 
 # ── Tool factory ──────────────────────────────────────────────────────────────
-def make_kl_tool(model, processor, images, image_dir):
+def make_kl_tool(model, processor, images, image_dir, is_vlm: bool = True):
     """
     Returns a LangChain tool that scores each layer's quantization sensitivity
     using library-based KL divergence (torch.nn.functional.kl_div).
@@ -622,7 +622,7 @@ def make_kl_tool(model, processor, images, image_dir):
         all_log_probs_baseline_cache = {}  # image → log_probs (filled fresh per layer)
         # We store pre-built input dicts (not forward passes — those need fresh weights)
         all_inputs = [
-            build_inputs(processor, model, os.path.join(image_dir, img))
+            build_inputs(processor, model, os.path.join(image_dir, img), is_vlm=is_vlm)
             for img in eval_images
         ]
         print(f"[kl] Inputs ready. Scoring {len(layer_names)} layers "

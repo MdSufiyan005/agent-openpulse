@@ -282,9 +282,12 @@ from typing import List, Optional
 
 import torch
 import subprocess
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM, AutoTokenizer
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.status import Status
 
+console = Console()
 load_dotenv()
 
 IMAGE_DIR  = os.environ.get("IMAGE_DIR",  "images")
@@ -311,6 +314,7 @@ class RunContext:
     device:        torch.device
     BLEU_FLOOR:    float = 0.8
     clean_state:   dict  = field(default_factory=dict)
+    is_vlm:        bool = True
     embedding_fn:  Optional[object] = None
     target_fn:     Optional[object] = None
 
@@ -362,11 +366,11 @@ def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
     Skips if output_gguf already exists.
     """
     if os.path.exists(output_gguf):
-        print(f"[setup] Found existing GGUF: {output_gguf}")
+        console.print(f"[bold green]✔[/bold green] Found existing GGUF: {output_gguf}")
         return
 
-    print(f"[setup] Downloading HF model: {hf_model_id}")
-    from huggingface_hub import snapshot_download
+    with console.status(f"[cyan]Downloading HF model: {hf_model_id}...[/cyan]", spinner="aesthetic"):
+        from huggingface_hub import snapshot_download
 
     local_dir = snapshot_download(
         repo_id=hf_model_id,
@@ -376,9 +380,8 @@ def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
             "*.json", "*.safetensors", "*.model",
             "*.py", "tokenizer.*", "preprocessor_config.json"
         ],
-        ignore_patterns=["*.bin", "*.pt", "*.h5", "*.msgpack"],
-    )
-    print(f"[setup] Downloaded to: {local_dir}")
+        )
+    console.print(f"[bold green]✔[/bold green] Downloaded to: {local_dir}")
 
     convert_script = os.path.join("llama.cpp", "convert_hf_to_gguf.py")
     if not os.path.exists(convert_script):
@@ -390,8 +393,8 @@ def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
     os.makedirs(os.path.dirname(output_gguf), exist_ok=True)
 
     cmd = ["python", convert_script, local_dir, "--outfile", output_gguf, "--outtype", "f16"]
-    print(f"[setup] Converting to GGUF F16: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    with console.status(f"[magenta]Converting to GGUF F16 (this may take a while)...[/magenta]", spinner="bouncingBall"):
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
         print(result.stderr)
@@ -402,26 +405,33 @@ def export_to_gguf_if_needed(hf_model_id: str, output_gguf: str):
 
 # ── Input builder (shared by KL + sparsity tools) ────────────────────────────
 
-def build_inputs(processor, model, image_path: str) -> dict:
+def build_inputs(processor, model, image_path: str, is_vlm: bool = True) -> dict:
     from PIL import Image
 
     device = next(model.parameters()).device
     dtype  = next(model.parameters()).dtype
 
-    img = Image.open(image_path).convert("RGB")
-
-    prompt = processor.apply_chat_template(
-        [{
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": "Describe this image briefly."},
-            ],
-        }],
-        add_generation_prompt=True,
-    )
-
-    raw = processor(text=prompt, images=[img], return_tensors="pt")
+    if is_vlm:
+        img = Image.open(image_path).convert("RGB")
+        prompt = processor.apply_chat_template(
+            [{
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "Describe this image briefly."},
+                ],
+            }],
+            add_generation_prompt=True,
+        )
+        raw = processor(text=prompt, images=[img], return_tensors="pt")
+    else:
+        # LLM fallback
+        prompt = processor.apply_chat_template(
+            [{"role": "user", "content": "Explain what this script does."}],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        raw = processor(prompt, return_tensors="pt")
 
     return {
         k: v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
@@ -435,32 +445,46 @@ def build_context() -> RunContext:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    print(f"[setup] MODEL_ID : {MODEL_ID}")
-    print(f"[setup] Device   : {device} ({dtype})")
+    console.print(f"[bold blue]SETUP[/bold blue] | MODEL: [cyan]{MODEL_ID}[/cyan] | DEVICE: [magenta]{device}[/magenta]")
 
     CACHE_DIR = "./artifacts/hf_cache"
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    # Load model — MODEL_ID must be a standard HF repo (not a GGUF repo)
-    try:
-        model = AutoModelForImageTextToText.from_pretrained(
-            MODEL_ID,
-            cache_dir=CACHE_DIR,
-            torch_dtype=dtype,
-            device_map="auto",
-        )
-        processor = AutoProcessor.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR)
-    except ValueError as e:
-        if "GGUF" in MODEL_ID or "gguf" in MODEL_ID.lower():
-            raise ValueError(
-                f"[setup] ERROR: MODEL_ID='{MODEL_ID}' appears to be a GGUF repo. "
-                "Transformers cannot load GGUF repos directly.\n"
-                "Set MODEL_ID to the base HF model, e.g.:\n"
-                "  Qwen/Qwen2.5-VL-2B-Instruct\n"
-                "  HuggingFaceTB/SmolVLM-Instruct\n"
-                "The GGUF file for quantization is handled separately via BASE_GGUF env var."
-            ) from e
-        raise
+    # Load model — try VLM first, fallback to LLM
+    is_vlm = True
+    with console.status(f"[cyan]Loading model weights into memory...[/cyan]", spinner="point"):
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(
+                MODEL_ID,
+                cache_dir=CACHE_DIR,
+                torch_dtype=dtype,
+                device_map="auto",
+            )
+            processor = AutoProcessor.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR)
+        except ValueError as e:
+            if "GGUF" in MODEL_ID or "gguf" in MODEL_ID.lower():
+                raise ValueError(
+                    f"[setup] ERROR: MODEL_ID='{MODEL_ID}' appears to be a GGUF repo. "
+                    "Transformers cannot load GGUF repos directly.\n"
+                    "Set MODEL_ID to the base HF model, e.g.:\n"
+                    "  Qwen/Qwen2.5-VL-2B-Instruct\n"
+                    "  HuggingFaceTB/SmolVLM-Instruct\n"
+                    "The GGUF file for quantization is handled separately via BASE_GGUF env var."
+                ) from e
+            
+            console.print(f"[warning]⚠ AutoModelForImageTextToText failed, trying AutoModelForCausalLM (LLM mode)...[/warning]")
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    MODEL_ID,
+                    cache_dir=CACHE_DIR,
+                    torch_dtype=dtype,
+                    device_map="auto",
+                )
+                processor = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR)
+                is_vlm = False
+            except Exception as e2:
+                console.print(f"[error]✘ Both VLM and LLM loading failed.[/error]")
+                raise e2
 
     if not torch.cuda.is_available():
         model = model.to(device)
@@ -493,6 +517,7 @@ def build_context() -> RunContext:
         IMAGE_DIR      = IMAGE_DIR,
         linear_layers  = linear_layers,
         device         = device,
+        is_vlm         = is_vlm,
     )
 
 
