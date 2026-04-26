@@ -355,6 +355,14 @@ def start_modelpulse_server(
     global METRICS_JSONL_PATH
     METRICS_JSONL_PATH = os.path.join(log_dir, "metrics.jsonl")
 
+    # Clear stale metrics
+    if os.path.exists(METRICS_JSONL_PATH):
+        try:
+            os.remove(METRICS_JSONL_PATH)
+            console.print(f"[dim]Cleared stale metrics: {METRICS_JSONL_PATH}[/dim]")
+        except Exception:
+            pass
+
     # Check if port is already in use
     check_host = "127.0.0.1" if host == "0.0.0.0" else host
     try:
@@ -543,7 +551,7 @@ def upload_model_to_server(
     if not os.path.exists(manifest_path):
         shard_gguf(input_gguf, shard_dir)
     else:
-        print(f"[Shard] Skipping — manifest already exists in {shard_dir}")
+        print(f"[Shard] Using existing manifest/shards in {shard_dir}")
 
     cmd = [
         *_modelpulse_base_cmd(), "server", "upload",

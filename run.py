@@ -76,6 +76,10 @@ DEFAULT_SPARSITY = [0.3, 0.4, 0.5]
 for d in [ARTIFACTS_DIR, RESULTS_DIR, MODELS_DIR, SHARDS_DIR]:
     os.makedirs(d, exist_ok=True)
 
+if os.path.exists(METRICS_PATH):
+    os.remove(METRICS_PATH)
+    console.print(f"[dim]Cleared stale metrics: {METRICS_PATH}[/dim]")
+
 
 # ─────────────────────────────────────────────
 # STARTUP — ModelPulse Infrastructure
@@ -325,7 +329,7 @@ else:
 console.print("\n[bold yellow]── PHASE 2 — Baseline Benchmark (input-f16.gguf) ──[/bold yellow]")
 baseline_metrics   = None
 fullquant_metrics  = None
-last_seen          = 0.0
+last_seen          = time.time()
 
 if not os.path.exists(BASE_GGUF):
     console.print(f"[bold red]✘ Error:[/bold red] Base GGUF not found at {BASE_GGUF}. Run setup first.")
@@ -365,7 +369,9 @@ if not os.path.exists(FULLQUANT_GGUF):
             full_quant_mode=True,              # new flag — see coding_agent.py
             dry_run=False,
         )
+    console.print(f"[progress]⌛ No new {FULLQUANT_GGUF} — using cached.[/progress]")
 
+last_seen = time.time()
 last_seen, fullquant_shard_dir = upload_with_retry(
     model_name="full-q4km",
     gguf_path=FULLQUANT_GGUF,
@@ -482,6 +488,7 @@ for it in range(ITERATIONS):
     model_name_it = f"{LAYERWISE_NAME}-{it}"
     prev_name     = f"{LAYERWISE_NAME}-{it-1}" if it > 0 else "full-q4km"
 
+    last_seen = time.time()
     last_seen, prev_layerwise_shard_dir = upload_with_retry(
         model_name=model_name_it,
         gguf_path=layerwise_gguf,
