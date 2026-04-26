@@ -1,8 +1,11 @@
 # Core
-torch>=2.1.0
-transformers>=4.40.0
+# Keep this set compatible in Docker:
+# - torch is installed separately in Dockerfile as CPU wheel (2.1.0+cpu)
+# - numpy<2 avoids binary ABI breakage with older compiled wheels
+# - transformers<4.50 avoids requiring torch>=2.4 at runtime
+transformers>=4.40.0,<4.50.0
 scipy>=1.11.0        # rel_entr for correct KL computation
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
 Pillow>=9.0.0
 
 # Agent / LLM

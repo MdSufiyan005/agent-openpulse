@@ -39,20 +39,26 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y \
     libgomp1 \
     curl \
+    build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy llama.cpp binaries from builder
 COPY --from=builder /build/llama.cpp/build/bin/llama-quantize /usr/local/bin/
+# Copy llama.cpp shared libraries required by llama-quantize
+COPY --from=builder /build/llama.cpp/build/bin/*.so* /usr/local/lib/
+# Copy llama.cpp conversion scripts used by setup.py
+COPY --from=builder /build/llama.cpp /app/llama.cpp
 
-# Copy installed Python packages from builder
-# Python --user installs to /root/.local in the builder (since it's root)
-COPY --from=builder /root/.local /root/.local
-
-# Ensure the local bin is in PATH
-ENV PATH=/root/.local/bin:$PATH
-ENV PYTHONPATH=/root/.local/lib/python3.10/site-packages:$PYTHONPATH
+# Install Python dependencies in runtime image so CLI entrypoints
+# (streamlit/modelpulse) are generated against the runtime interpreter.
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir nni streamlit plotly pandas
 
 # Copy application code
 COPY . .
@@ -62,6 +68,7 @@ RUN mkdir -p artifacts/results artifacts/models-storage artifacts/shards images 
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 # Expose ports
 EXPOSE 8000

@@ -444,6 +444,9 @@ def build_inputs(processor, model, image_path: str, is_vlm: bool = True) -> dict
 def build_context() -> RunContext:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.float16 if torch.cuda.is_available() else torch.float32
+    # Only use Accelerate device mapping when CUDA is available.
+    # On CPU, avoid dispatch hooks so `.to(...)` conflicts never happen.
+    device_map = "auto" if torch.cuda.is_available() else None
 
     console.print(f"[bold blue]SETUP[/bold blue] | MODEL: [cyan]{MODEL_ID}[/cyan] | DEVICE: [magenta]{device}[/magenta]")
 
@@ -458,7 +461,8 @@ def build_context() -> RunContext:
                 MODEL_ID,
                 cache_dir=CACHE_DIR,
                 torch_dtype=dtype,
-                device_map="auto",
+                device_map=device_map,
+                low_cpu_mem_usage=True,
             )
             processor = AutoProcessor.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR)
         except ValueError as e:
@@ -478,7 +482,8 @@ def build_context() -> RunContext:
                     MODEL_ID,
                     cache_dir=CACHE_DIR,
                     torch_dtype=dtype,
-                    device_map="auto",
+                    device_map=device_map,
+                    low_cpu_mem_usage=True,
                 )
                 processor = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=CACHE_DIR)
                 is_vlm = False
@@ -486,8 +491,6 @@ def build_context() -> RunContext:
                 console.print(f"[error]✘ Both VLM and LLM loading failed.[/error]")
                 raise e2
 
-    if not torch.cuda.is_available():
-        model = model.to(device)
     model.eval()
 
     # Auto-detect decoder linear layers

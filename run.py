@@ -68,7 +68,9 @@ KL_THRESHOLD     = 0.05
 BATCH_SIZE       = 20
 N_SAMPLES        = 3
 ITERATIONS       = 3
-METRICS_TIMEOUT  = 120
+METRICS_TIMEOUT  = int(os.getenv("METRICS_TIMEOUT", 600))
+RETRY_BACKOFF_S  = int(os.getenv("UPLOAD_RETRY_BACKOFF_S", 5))
+MAX_RETRY_BACKOFF_S = int(os.getenv("UPLOAD_MAX_RETRY_BACKOFF_S", 60))
 DEFAULT_SPARSITY = [0.3, 0.4, 0.5]
 
 for d in [ARTIFACTS_DIR, RESULTS_DIR, MODELS_DIR, SHARDS_DIR]:
@@ -172,13 +174,16 @@ def upload_with_retry(model_name: str, gguf_path: str, metrics_path: str,
                       base_shard_dir: str = None) -> tuple[float, str]:
     """Upload + wait for metrics. Re-uploads on timeout. Returns (new_last_seen, shard_dir)."""
     shard_dir = None
+    backoff_s = max(1, RETRY_BACKOFF_S)
     with console.status(f"[bold magenta]Uploading {model_name} and waiting for metrics...[/bold magenta]", spinner="simpleDots"):
         while True:
             shard_dir = shard_and_upload(model_name, gguf_path, base_name, base_shard_dir)
             result = wait_for_metrics(metrics_path, last_seen)
             if result != -1:
                 return result, shard_dir
-            console.print("[yellow]⚠️ [RETRY] Re-uploading to prompt client...[/yellow]")
+            console.print(f"[yellow]⚠️ [RETRY] Re-uploading after {backoff_s}s backoff...[/yellow]")
+            time.sleep(backoff_s)
+            backoff_s = min(MAX_RETRY_BACKOFF_S, backoff_s * 2)
 
 
 def parse_planner_response(response) -> dict:

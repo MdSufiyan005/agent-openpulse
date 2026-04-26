@@ -265,6 +265,7 @@ import time
 import socket
 import subprocess
 import threading
+import sys
 from langchain_core.tools import tool
 from rich.console import Console
 from rich.panel import Panel
@@ -292,6 +293,13 @@ _bridge_proc: subprocess.Popen | None = None
 # Canonical path — set by start_modelpulse_server(), imported by run.py
 # Canonical path — set by start_modelpulse_server(), imported by run.py
 METRICS_JSONL_PATH: str = "artifacts/results/metrics.jsonl"
+
+def _modelpulse_base_cmd() -> list[str]:
+    """
+    Return a runnable ModelPulse command.
+    Use module execution to avoid broken shebang issues in copied user-site scripts.
+    """
+    return [sys.executable, "-m", "modelpulse.main"]
 
 
 def get_server_ip() -> str:
@@ -357,7 +365,7 @@ def start_modelpulse_server(
         pass
 
     cmd = [
-        "modelpulse", "server", "run",
+        *_modelpulse_base_cmd(), "server", "run",
         "--host", host,
         "--port", str(port),
         "--ping-interval","120.0",
@@ -422,7 +430,7 @@ def start_modelpulse_bridge(server_url: str) -> subprocess.Popen:
         print("[ModelPulse] Bridge already running — skipping.")
         return _bridge_proc
 
-    cmd = ["modelpulse", "bridge", "run", server_url, "--benchmark"]
+    cmd = [*_modelpulse_base_cmd(), "bridge", "run", server_url, "--benchmark"]
     
     with console.status(f"[info]Launching ModelPulse Bridge...[/info]", spinner="bouncingBar"):
         _bridge_proc = subprocess.Popen(
@@ -493,7 +501,7 @@ def shard_gguf(input_gguf: str, output_dir: str) -> str:
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    cmd = ["modelpulse", "server", "convert", input_gguf, output_dir]
+    cmd = [*_modelpulse_base_cmd(), "server", "convert", input_gguf, output_dir]
     print(f"[Shard] {' '.join(cmd)}")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -538,7 +546,7 @@ def upload_model_to_server(
         print(f"[Shard] Skipping — manifest already exists in {shard_dir}")
 
     cmd = [
-        "modelpulse", "server", "upload",
+        *_modelpulse_base_cmd(), "server", "upload",
         clean_name,
         shard_dir,
         "--server", server_url,
